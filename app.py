@@ -100,7 +100,7 @@ TRANSLATIONS = {
         "new_user": "+ Neuer Nutzer",
         "new_user_name": "Nutzername",
         "new_user_email": "E-Mail-Adresse",
-        "new_user_times": "Benachrichtigungszeiten (z. B. 07:30, 18:30)",
+
         "new_user_create": "Nutzer anlegen",
         "new_user_needs_name": "Bitte einen Nutzernamen angeben.",
         "new_user_exists": "Nutzer \"{name}\" existiert bereits.",
@@ -108,11 +108,13 @@ TRANSLATIONS = {
         "new_user_from_current": "Einstellungen aus der aktuellen Sidebar übernehmen",
         "alert_times_popover": "\u23f0 Alerts",
         "alert_days_label": "Tage",
-        "alert_times_help": "Kommagetrennt im 24-Stunden-Format, z. B. 07:30, 18:30",
+        "alert_hours_label": "Stunden (volle Stunden)",
+        "alert_hours_help": "Zu diesen vollen Stunden wird gepr\u00fcft und ggf. eine "
+                            "E-Mail verschickt.",
         "alert_times_save": "Alerts speichern",
         "alert_times_saved": "Alerts für {name}: {days} um {times}",
         "alert_times_none": "keine",
-        "alert_times_invalid": "Keine gültigen Zeiten erkannt – bitte Format HH:MM verwenden.",
+        "alert_times_invalid": "Bitte mindestens eine Stunde auswählen.",
         "alert_days": {
             "today": "Nur heute",
             "tomorrow": "Nur morgen",
@@ -199,7 +201,7 @@ TRANSLATIONS = {
         "new_user": "+ New User",
         "new_user_name": "User name",
         "new_user_email": "Email address",
-        "new_user_times": "Notification times (e.g. 07:30, 18:30)",
+
         "new_user_create": "Create user",
         "new_user_needs_name": "Please enter a user name.",
         "new_user_exists": "User \"{name}\" already exists.",
@@ -207,11 +209,13 @@ TRANSLATIONS = {
         "new_user_from_current": "Copy settings from the current sidebar",
         "alert_times_popover": "\u23f0 Alerts",
         "alert_days_label": "Days",
-        "alert_times_help": "Comma separated, 24-hour format, e.g. 07:30, 18:30",
+        "alert_hours_label": "Hours (full hours)",
+        "alert_hours_help": "At these full hours the forecast is checked and an "
+                            "e-mail is sent if a window exists.",
         "alert_times_save": "Save alerts",
         "alert_times_saved": "Alerts for {name}: {days} at {times}",
         "alert_times_none": "none",
-        "alert_times_invalid": "No valid times found – please use HH:MM.",
+        "alert_times_invalid": "Please select at least one hour.",
         "alert_days": {
             "today": "Today only",
             "tomorrow": "Tomorrow only",
@@ -668,24 +672,6 @@ def current_sun_time():
     return sun_times[0] if sun_times else None
 
 
-def save_alert_times(name, raw_times):
-    """Update one profile's check_times.
-
-    Returns (times, changed). Invalid input is rejected without touching the
-    stored value, so a typo cannot silently delete a user's alerts.
-    """
-    times = profiles.normalise_check_times(raw_times)
-    if not times:
-        return [], False
-
-    users = profiles.load_users()
-    profile = profiles.normalise_profile(users.get(name), list(wf.SPOTS))
-    profile["check_times"] = times
-    users[name] = profile
-    profiles.save_users(users)
-    return times, True
-
-
 def save_current_settings(name):
     """Persist the live sidebar values into `name`'s profile."""
     users = profiles.load_users()
@@ -846,38 +832,56 @@ def profile_bar(lang):
     return selected
 
 
-def save_alert_settings(name, raw_times, alert_days):
-    """Persist a profile's notification times and day scope together.
+def _seed_hour_widget(name, profile):
+    """Give the hours widget the profile's saved hours on first view or switch.
 
-    Returns (times, changed). Invalid times are rejected without touching the
-    stored value, so a typo cannot silently delete a user's alerts.
+    Streamlit gives the widget ownership of its key once created, so the saved
+    value must not overwrite an in-progress or rejected selection on every
+    render. Seeding when the key is absent (first view) or when a different
+    profile becomes active keeps the shown selection consistent with the stored
+    one, while leaving active edits alone.
     """
-    times = profiles.normalise_check_times(raw_times)
-    if not times:
+    key = f"hours_input_{name}"
+    if key not in st.session_state or st.session_state.get("_hours_user") != name:
+        st.session_state["_hours_user"] = name
+        st.session_state[key] = profiles.check_hours(profile)
+
+
+def save_alert_settings(name, hours, alert_days):
+    """Persist a profile's alert hours and day scope together.
+
+    Returns (hours, changed). An empty selection is rejected rather than
+    clearing the schedule, so an accidental click cannot delete a user's alerts.
+    """
+    hours = profiles.normalise_check_hours(hours)
+    if not hours:
         return [], False
 
     users = profiles.load_users()
     profile = profiles.normalise_profile(users.get(name), list(wf.SPOTS))
-    profile["check_times"] = times
+    profile["check_hours"] = hours
     profile["alert_days"] = profiles.normalise_alert_days(alert_days)
+    # normalise_profile omits the legacy check_times key, so saving migrates it.
     users[name] = profile
     profiles.save_users(users)
-    return times, True
+    return hours, True
 
 
 def _alert_times_popover(lang, name, profile):
-    """Edit an existing profile's alert days and notification times.
+    """Edit an existing profile's alert days and hours.
 
-    Both fields are written to the file only on submit, so typing does not churn
-    users.json on every keystroke.
+    Writes to the file only on submit, so changing the selection does not churn
+    users.json until the user confirms.
     """
     day_options = profiles.ALERT_DAYS
     stored_days = profiles.normalise_alert_days(profile.get("alert_days"))
-    key = f"days_input_{name}"
-    # Seed the radio from the profile once per user; afterwards the widget owns
-    # the value so switching profiles does not clobber an unsaved choice.
-    if key not in st.session_state:
-        st.session_state[key] = stored_days
+    day_key = f"days_input_{name}"
+    hour_key = f"hours_input_{name}"
+    # Seed only when the widget has no state yet; an in-progress or rejected
+    # selection must survive the rerun that follows a button click.
+    if day_key not in st.session_state:
+        st.session_state[day_key] = stored_days
+    _seed_hour_widget(name, profile)
 
     with st.popover(t(lang, "alert_times_popover"), width="stretch"):
         labels = TRANSLATIONS[lang]["alert_days"]
@@ -885,20 +889,25 @@ def _alert_times_popover(lang, name, profile):
             t(lang, "alert_days_label"),
             options=day_options,
             format_func=lambda key_: labels[key_],
-            key=key)
+            key=day_key)
 
-        raw = st.text_input(
-            t(lang, "alert_times_help"),
-            value=", ".join(profile.get("check_times", [])),
-            key=f"times_input_{name}")
+        # Full hours only: 00:00 .. 23:00.
+        hours = st.multiselect(
+            t(lang, "alert_hours_label"),
+            options=list(range(24)),
+            format_func=lambda h: f"{h:02d}:00",
+            key=hour_key,
+            help=t(lang, "alert_hours_help"))
 
         if st.button(t(lang, "alert_times_save"), width="stretch",
                      key=f"times_save_{name}"):
-            times, changed = save_alert_settings(name, raw, alert_days)
+            saved_hours, changed = save_alert_settings(name, hours, alert_days)
             if changed:
-                st.toast(t(lang, "alert_times_saved", name=name,
-                             days=labels[alert_days], times=", ".join(times)),
-                         icon="\u23f0")
+                st.toast(
+                    t(lang, "alert_times_saved", name=name,
+                      days=labels[alert_days],
+                      times=", ".join(f"{h:02d}:00" for h in saved_hours)),
+                    icon="\u23f0")
             else:
                 st.warning(t(lang, "alert_times_invalid"), icon="\u26a0\ufe0f")
 
@@ -913,8 +922,13 @@ def _new_user_popover(lang):
         with st.form("new_user_form", clear_on_submit=False):
             name = st.text_input(t(lang, "new_user_name"))
             email = st.text_input(t(lang, "new_user_email"))
-            times = st.text_input(t(lang, "new_user_times"),
-                                  placeholder="07:30, 18:30")
+            # Full hours only; defaults to the common morning/evening slots.
+            hours = st.multiselect(
+                t(lang, "alert_hours_label"),
+                options=list(range(24)),
+                default=[7, 18],
+                format_func=lambda h: f"{h:02d}:00",
+                help=t(lang, "alert_hours_help"))
             copy_current = st.checkbox(t(lang, "new_user_from_current"),
                                        value=True)
             submitted = st.form_submit_button(t(lang, "new_user_create"),
@@ -931,7 +945,7 @@ def _new_user_popover(lang):
             st.warning(t(lang, "new_user_exists", name=clean), icon="\u26a0\ufe0f")
         else:
             users[clean] = profiles.new_profile(
-                email=email, check_times=times,
+                email=email, check_hours=hours,
                 settings=current_settings() if copy_current else None,
                 valid_spots=list(wf.SPOTS))
             profiles.save_users(users)

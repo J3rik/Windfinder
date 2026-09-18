@@ -5,16 +5,17 @@ Run it alongside the Streamlit app:
 
     .venv/bin/python alert_service.py            # run continuously
     .venv/bin/python alert_service.py --once     # single pass, then exit
-    .venv/bin/python alert_service.py --test     # ignore check_times, alert now
+    .venv/bin/python alert_service.py --test     # ignore check_hours, alert now
     .venv/bin/python alert_service.py --list     # show profiles and next runs
 
 Design notes
 ------------
 * users.json is re-read at the start of every cycle, so profile edits made in
   the Streamlit UI take effect without restarting this service.
-* Each cycle compares the current Europe/Berlin time against every user's
-  check_times. A (user, time) pair fires at most once per day, tracked in an
-  in-memory set, so a restart at most repeats the current minute.
+* Alerts fire on FULL HOURS. Each profile stores `check_hours` (0-23 integers);
+  the worker wakes at :00 and evaluates the users whose list contains that hour.
+* A (user, day, hour) key is remembered so a cycle can never send twice for the
+  same hour, even if the process restarts or the host wakes up late.
 * Alerts always go to the log. Email is sent as well when the SMTP_* environment
   variables below are present; without them the service stays log-only.
 """
@@ -36,7 +37,6 @@ import profiles
 import wind_forecast as wf
 
 TIMEZONE = ZoneInfo(wf.TIMEZONE)
-POLL_SECONDS = 30          # how often to re-read the clock (cheap)
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(message)s"
 ENV_PATH = Path(__file__).with_name(".env")
 
@@ -469,33 +469,40 @@ def notify(name, profile, results, windows):
         log.info("  email sent to %s", recipient)
 
 
-def run_cycle(fired, force=False):
-    """One pass over all profiles. Returns the number of alerts sent."""
+def run_cycle(fired, force=False, now=None):
+    """One pass over all profiles. Returns the number of alerts sent.
+
+    Alerts fire on full hours: a profile is evaluated when the current hour is
+    in its `check_hours` list. The (user, day, hour) key makes the run
+    idempotent, so a restart or a late wake-up cannot send twice in one hour.
+    """
     users = profiles.load_users()          # fresh read every cycle
     if not users:
         log.info("no profiles in %s; nothing to do", profiles.USERS_PATH)
         return 0
 
-    now = datetime.now(TIMEZONE)
+    now = now or datetime.now(TIMEZONE)
     today = now.strftime("%Y-%m-%d")
-    current = now.strftime("%H:%M")
+    current_hour = now.hour
     sent = 0
 
     for name, raw in users.items():
         profile = profiles.normalise_profile(raw, profiles.spot_names())
-        times = profile["check_times"]
+        hours = profile["check_hours"]
 
         if not force:
-            if current not in times:
+            if current_hour not in hours:
                 continue
-            key = (name, today, current)
+            key = (name, today, current_hour)
             if key in fired:
+                log.debug("%s already alerted this hour (%02d:00)", name,
+                          current_hour)
                 continue
             fired.add(key)
 
         scope = profile["alert_days"]
-        log.info("checking %s (scheduled %s, days %s)%s", name,
-                 ", ".join(times) or "never", scope,
+        log.info("checking %s (hours %s, days %s)%s", name,
+                 ", ".join(f"{h:02d}:00" for h in hours) or "never", scope,
                  " [forced]" if force else "")
         try:
             results = evaluate_user(name, profile)
@@ -515,21 +522,42 @@ def run_cycle(fired, force=False):
         else:
             log.info("  no rideable window for scope '%s'", scope)
 
-    # Drop yesterday's dedupe keys so the set cannot grow without bound.
+    # Drop previous days' keys so the set cannot grow without bound.
     for key in [k for k in fired if k[1] != today]:
         fired.discard(key)
     return sent
 
 
-def next_check_times(users, first_only=True):
-    """Upcoming check times today, for --list output."""
-    now = datetime.now(TIMEZONE).strftime("%H:%M")
+def users_due(users, hour):
+    """Names of profiles that want an alert at `hour` (0-23)."""
+    due = []
+    for name, raw in users.items():
+        profile = profiles.normalise_profile(raw, profiles.spot_names())
+        if hour in profile["check_hours"]:
+            due.append(name)
+    return due
+
+
+def seconds_until_next_hour(now=None):
+    """Seconds until the next full hour, plus a small margin past :00."""
+    now = now or datetime.now(TIMEZONE)
+    seconds = (59 - now.minute) * 60 + (60 - now.second)
+    return float(seconds)
+
+
+def next_check_hours(users, first_only=True):
+    """Upcoming full hours today, for --list output."""
+    current_hour = datetime.now(TIMEZONE).hour
     upcoming = []
     for name, raw in users.items():
         profile = profiles.normalise_profile(raw, profiles.spot_names())
-        later = [t for t in profile["check_times"] if t >= now]
+        later = [h for h in profile["check_hours"] if h >= current_hour]
         upcoming.append((name, profile, later[:1] if first_only else later))
-    return upcoming, now
+    return upcoming
+
+
+def _format_hours(hours):
+    return ", ".join(f"{h:02d}:00" for h in hours) or "-"
 
 
 def main(argv=None):
@@ -537,21 +565,21 @@ def main(argv=None):
     parser.add_argument("--once", action="store_true",
                         help="run a single cycle and exit")
     parser.add_argument("--test", action="store_true",
-                        help="ignore check_times and alert for every user now")
+                        help="ignore check_hours and alert for every user now")
     parser.add_argument("--list", action="store_true",
-                        help="list profiles, check times and next run")
+                        help="list profiles, alert hours and next run")
     parser.add_argument("--days", type=int, default=wf.FORECAST_DAYS,
                         help="forecast horizon to evaluate")
-    parser.add_argument("--poll", type=int, default=POLL_SECONDS,
-                        help="seconds between clock checks")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 
     profiles.ensure_users_file()
     users = profiles.load_users()
+
     if args.list:
-        upcoming, now = next_check_times(users)
+        upcoming = next_check_hours(users)
+        now = datetime.now(TIMEZONE).strftime("%H:%M")
         print(f"profiles file : {profiles.USERS_PATH}")
         print(f"local time    : {now} ({wf.TIMEZONE})")
         print(f"env file      : {ENV_PATH} ({'found' if ENV_PATH.exists() else 'missing'})")
@@ -559,9 +587,11 @@ def main(argv=None):
         if not users:
             print("no profiles defined")
         for name, profile, later in upcoming:
-            print(f"  {name:<16} times={','.join(profile['check_times']) or '-':<14} "
-                  f"spots={len(profile['settings']['active_spots'])}")
-            print(f"  {'':<16} next today: {later[0] if later else 'none left'}")
+            print(f"  {name:<16} hours={_format_hours(profile['check_hours']):<18} "
+                  f"spots={len(profile['settings']['active_spots'])} "
+                  f"days={profile['alert_days']}")
+            print(f"  {'':<16} next today: "
+                  f"{f'{later[0]:02d}:00' if later else 'none left'}")
         return 0
 
     if args.test:
@@ -575,15 +605,23 @@ def main(argv=None):
         log.info("done: %d alert(s)", sent)
         return 0
 
-    log.info("alert service started (tz %s, poll %ds, email %s)",
-             wf.TIMEZONE, args.poll, "on" if email_enabled() else "off")
+    log.info("alert service started (tz %s, fires on the full hour, email %s)",
+             wf.TIMEZONE, "on" if email_enabled() else "off")
+
     fired = set()
+    # Catch up immediately: if the service restarted just after :00, or the
+    # host was asleep, this still alerts for the current hour. The (user, day,
+    # hour) key makes it a no-op when that hour was already handled.
     while True:
         try:
             run_cycle(fired)
         except Exception as error:  # keep the worker alive no matter what
             log.exception("cycle failed: %s", error)
-        time.sleep(args.poll)
+
+        delay = seconds_until_next_hour()
+        log.info("sleeping %.0fs until %02d:00", delay,
+                 (datetime.now(TIMEZONE).hour + 1) % 24)
+        time.sleep(delay)
 
 
 if __name__ == "__main__":

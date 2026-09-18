@@ -6,7 +6,7 @@ The schema is deliberately plain so it can be edited by hand:
 {
   "alex": {
     "email": "rider@example.com",
-    "check_times": ["07:30", "18:30"],
+    "check_hours": [7, 18],
     "alert_days": "both",
     "settings": {
       "base_wind": [10.0, 20.0],
@@ -18,6 +18,10 @@ The schema is deliberately plain so it can be edited by hand:
     }
   }
 }
+
+`check_hours` holds the full hours (0-23) at which alerts are evaluated. Files
+written before this field existed may instead carry `check_times` with "HH:MM"
+strings; those whole hours are migrated on read.
 
 This module is intentionally free of Streamlit and of wind_forecast imports so
 the background alert service can use it without pulling in the UI stack.
@@ -45,6 +49,9 @@ DEFAULT_SETTINGS = {
 
 # "07:30" / "7:30" -> normalised to zero-padded HH:MM.
 _TIME_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
+
+# Alerts fire on full hours only, so a schedule is a set of 0-23 integers.
+CHECK_HOURS = list(range(24))
 
 # Which forecast days an alert may cover. Stored per profile as one of these
 # keys; both the app and the alert service read this list.
@@ -138,6 +145,52 @@ def save_users(users_dict, path=USERS_PATH):
     return users_dict
 
 
+def normalise_check_hours(raw, fallback_times=None):
+    """Coerce a schedule into a sorted list of unique hours (0-23).
+
+    Accepts ints (7), numeric strings ("7"), "07:00" strings, or a single
+    comma-separated string. When nothing usable is given but legacy
+    `check_times` exist, the whole hours are derived from those so existing
+    profiles keep alerting at the top of the hour.
+    """
+    if isinstance(raw, (str, int, float)):
+        items = [part for part in str(raw).split(",")] if isinstance(raw, str) else [raw]
+    elif isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+    else:
+        items = []
+
+    hours = set()
+    for item in items:
+        hour = None
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, int):
+            hour = item
+        elif isinstance(item, float) and item.is_integer():
+            hour = int(item)
+        else:
+            text = str(item).strip()
+            match = _TIME_RE.match(text)          # "07:00" / "7:00"
+            if match:
+                hour = int(match.group(1))
+            elif text.isdigit():
+                hour = int(text)                  # "7"
+        if hour is not None and 0 <= hour <= 23:
+            hours.add(hour)
+
+    if not hours and fallback_times:
+        for time_text in normalise_check_times(fallback_times):
+            hours.add(int(time_text[:2]))
+    return sorted(hours)
+
+
+def check_hours(profile):
+    """Hours a profile wants alerts for, tolerant of files without the field."""
+    return normalise_check_hours(profile.get("check_hours"),
+                                 fallback_times=profile.get("check_times"))
+
+
 def normalise_check_times(raw):
     """Accepts ['07:30','18:30'] or '07:30, 18:30' and returns sorted HH:MM."""
     if isinstance(raw, str):
@@ -208,27 +261,26 @@ def normalise_settings(raw, valid_spots=None):
 
 
 def normalise_profile(raw, valid_spots=None):
-    """Coerce one profile entry (email, check_times, alert_days, settings)."""
+    """Coerce one profile entry (email, check_hours, alert_days, settings)."""
     raw = raw if isinstance(raw, dict) else {}
     return {
         "email": str(raw.get("email", "") or "").strip(),
-        "check_times": normalise_check_times(raw.get("check_times", [])),
-        # Default "both" matches the behaviour before this option existed.
+        # Full hours only; legacy check_times are folded into check_hours.
+        "check_hours": check_hours(raw),
         "alert_days": normalise_alert_days(raw.get("alert_days")),
         "settings": normalise_settings(raw.get("settings"), valid_spots),
     }
 
 
-def new_profile(email="", check_times=None, settings=None, valid_spots=None,
+def new_profile(email="", check_hours=None, settings=None, valid_spots=None,
                 alert_days="both"):
     """Build a complete profile, merged over the defaults."""
-    profile = normalise_profile(
+    return normalise_profile(
         {"email": email,
-         "check_times": check_times or [],
+         "check_hours": check_hours or [],
          "alert_days": alert_days,
          "settings": settings or {}},
         valid_spots)
-    return profile
 
 
 def spot_names():

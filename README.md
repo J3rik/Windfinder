@@ -70,14 +70,14 @@ docker compose up -d --build
 
 ## Alert worker
 
-The worker is a long-running process. It re-reads `users.json` every 30 seconds,
-so changes made in the UI apply without a restart.
+The worker is a long-running process. It re-reads `users.json` at the start of
+every cycle, so changes made in the UI apply without a restart.
 
 ```bash
-.venv/bin/python alert_service.py --list    # profiles, times, mail status
+.venv/bin/python alert_service.py --list    # profiles, hours, mail status
 .venv/bin/python alert_service.py --test    # send a test mail now
 .venv/bin/python alert_service.py --once    # one scheduled pass, then exit
-.venv/bin/python alert_service.py           # run continuously
+.venv/bin/python alert_service.py           # run continuously (wakes at :00)
 ```
 
 Alert settings are per user (the **⏰ Alerts** button in the header):
@@ -85,7 +85,12 @@ Alert settings are per user (the **⏰ Alerts** button in the header):
 | Setting | Meaning |
 |---|---|
 | `Tage` / `Days` | Look at today, tomorrow, both, or all forecast days |
-| Times | Comma-separated `HH:MM` in Europe/Berlin, e.g. `07:30, 18:30` |
+| Hours | Full hours (00:00 … 23:00) in Europe/Berlin, e.g. `07:00, 18:00` |
+
+Alerts fire **on the full hour**. At every `:00` the worker reads `users.json`
+and evaluates only the users whose selected hours include that hour, so nothing
+is polled in between. A `(user, day, hour)` key guarantees an hour is never
+alerted twice, even across a restart.
 
 A mail is only sent when a rideable window actually exists in the chosen day
 scope; otherwise the run is logged and nothing is sent.

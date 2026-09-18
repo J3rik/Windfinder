@@ -1,13 +1,15 @@
 # Windfinder deployment.
 #
-#   1. Fill in the SMTP_* values below with your own mail account.
-#   2. docker compose up -d
-#   3. open http://<server>:8501
+#   1. Set the SMTP_* values on the alert-service below.
+#   2. Ensure a users.json file exists (see the volume note).
+#   3. docker compose up -d              # dashboard only
+#      docker compose --profile alerts up -d   # dashboard + mail worker
 #
-# Profile data lives in ./users.json on the host (mounted below), so it survives
-# image rebuilds and container replacement. Keep that file OUT of git.
+# Profile data is bind-mounted from the host so it survives rebuilds.
 
 services:
+  # The dashboard. It only reads and writes profiles - it never sends mail,
+  # so it deliberately gets no SMTP credentials.
   kite-forecast:
     build: .
     image: windfinder:latest
@@ -16,26 +18,13 @@ services:
       - "8501:8501"
     volumes:
       # Host file so profiles persist across container updates. If this file is
-      # missing, Docker creates a DIRECTORY with that name and the app cannot
-      # write profiles - keep an empty users.json ({}) in the repo root.
+      # missing, Docker creates a DIRECTORY with that name and profile saving
+      # fails, so create it first:  echo '{}' > users.json
       - ./users.json:/app/users.json
-    environment:
-      # --- Mail (used by the alert worker) ---------------------------------
-      # Leave the placeholders as they are to run the dashboard without mail.
-      - SMTP_SERVER=smtp.example.com
-      - SMTP_PORT=587
-      - SMTP_USER=your-email@example.com
-      - SMTP_PASSWORD=your-secret-password
-      - SMTP_SENDER=your-email@example.com
-      # --- Optional ---------------------------------------------------------
-      # Ports tried if SMTP_PORT is unreachable (firewall / provider block).
-      - SMTP_FALLBACK_PORTS=25,465
-      # Set to 0 for implicit TLS on port 465.
-      - SMTP_STARTTLS=1
     restart: unless-stopped
 
-  # Optional: the alert worker that sends the scheduled e-mails. It is a
-  # separate long-running process, so it has its own container. Enable it with
+  # The alert worker - the only component that sends mail, so it is the only
+  # one holding SMTP credentials. Enable with:
   #   docker compose --profile alerts up -d
   alert-service:
     build: .
@@ -45,12 +34,16 @@ services:
     volumes:
       - ./users.json:/app/users.json
     environment:
+      # --- Mail (required for sending) --------------------------------------
       - SMTP_SERVER=smtp.example.com
       - SMTP_PORT=587
       - SMTP_USER=your-email@example.com
       - SMTP_PASSWORD=your-secret-password
       - SMTP_SENDER=your-email@example.com
+      # --- Optional ---------------------------------------------------------
+      # Ports tried if SMTP_PORT is unreachable (firewall / provider block).
       - SMTP_FALLBACK_PORTS=25,465
+      # Set to 0 for implicit TLS on port 465.
       - SMTP_STARTTLS=1
     restart: unless-stopped
     profiles:
