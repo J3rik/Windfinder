@@ -1,0 +1,41 @@
+# Keep the build context small and never copy local state into the image.
+
+# Secrets - never bake credentials into an image layer.
+.env
+.env.*
+!.env.example
+!.env.example
+
+# Local profile data is mounted at runtime. Note: it must NOT be ignored here,
+# because the Dockerfile COPYs a placeholder users.json into the image (that
+# also guarantees the compose bind mount has a file, not a directory, to attach
+# to). .gitignore keeps real profile data out of version control.
+
+# Virtual environments.
+.venv/
+venv/
+env/
+
+# Python bytecode / build artefacts.
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Version control and editor noise.
+.git/
+.gitignore
+.github/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Documentation and local scratch files.
+*.md
+.preview/
+*.log
+*.tmp
+*.bak
+users.backup.json

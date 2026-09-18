@@ -1,0 +1,37 @@
+# --- Secrets -----------------------------------------------------------------
+# Real mail credentials. .env.example is a template and IS committed.
+.env
+.env.*
+!.env.example
+
+# --- Local user data ---------------------------------------------------------
+# users.json holds personal profiles (names, e-mail addresses, preferences).
+# An empty {} placeholder is committed so the Docker bind mount has a file to
+# attach to; any local profile data added on top stays untracked.
+users.json
+users.backup.json
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# --- Virtual environments ----------------------------------------------------
+.venv/
+venv/
+env/
+
+# --- Tooling / editor --------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# --- Local scratch -----------------------------------------------------------
+.preview/
+*.log
+*.tmp
+*.bak

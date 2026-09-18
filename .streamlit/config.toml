@@ -1,0 +1,9 @@
+# Streamlit configuration.
+#
+# The "Daylight only" checkbox clamps the time-window slider by writing the
+# widget's key in its on_change callback -- the documented way to adjust a
+# widget from a callback. Streamlit still logs a "default value ... also set via
+# the Session State API" warning for that combination, so it is disabled here.
+# The warning is advisory only; the clamp is applied correctly.
+[global]
+disableWidgetStateDuplicationWarning = true
