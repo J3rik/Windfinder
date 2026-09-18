@@ -29,7 +29,8 @@ import re
 import tempfile
 from pathlib import Path
 
-USERS_PATH = Path(__file__).with_name("users.json")
+USERS_PATH = Path(os.environ.get("WINDFINDER_USERS_PATH")
+                  or Path(__file__).with_name("users.json"))
 
 # Default settings for a freshly created profile. Mirrors the app defaults so a
 # new user starts from exactly what the sidebar shows on a cold start.
